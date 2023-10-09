@@ -1,4 +1,4 @@
-# Reactiv Elasticsearch Client Concurrency Test
+# Reactive Elasticsearch Client Concurrency Test
 
 Requirements:
 - elasticsearch 7+ local or remote installation - single node or cluster without SSL
