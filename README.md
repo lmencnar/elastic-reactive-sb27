@@ -16,7 +16,7 @@ Additionally, the concurrency can be limited by a semaphore guarding the bulk as
 
 The timeouts can be configured.
 
-It was observed running on 6 core 12 desktop class machine with local elastic as downloaded with any settings changes.
+It was observed running on 6 core 12 threads desktop class machine with local elastic as downloaded with any settings changes.
 With settings as configured the usual bulk executes within 200-300 milliseconds.
 
 But with growing concurrency some operations are stuck and complete after longer than 1 second.
