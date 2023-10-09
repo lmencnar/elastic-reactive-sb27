@@ -1,5 +1,9 @@
 # Reactive Elasticsearch Client Concurrency Test
 
+Version:
+- springboot 2.7.15
+- elastic data reactive 4.4.15 - using netty
+
 Requirements:
 - elasticsearch 7+ local or remote installation - single node or cluster without SSL
 - java 17 or similar 
