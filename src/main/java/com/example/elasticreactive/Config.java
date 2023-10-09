@@ -1,6 +1,9 @@
 package com.example.elasticreactive;
 
 import io.netty.channel.ChannelOption;
+import io.netty.channel.epoll.EpollChannelOption;
+import io.netty.channel.socket.nio.NioChannelOption;
+import jdk.net.ExtendedSocketOptions;
 import org.apache.http.HttpHost;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestHighLevelClient;
@@ -54,6 +57,17 @@ public class Config extends AbstractReactiveElasticsearchConfiguration {
                             HttpClient httpClient = HttpClient
                                     .create(ConnectionProvider.create(connectionProviderName, esMaxNettyConnections))
                                     .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, esConnectTimeoutMillis)
+                                    // enabling keep alive - but it should not matter much
+                                    // https://www.baeldung.com/spring-webflux-timeout
+                                    .option(ChannelOption.SO_KEEPALIVE, true)
+                                    // this might work on linux
+//                                    .option(EpollChannelOption.TCP_KEEPIDLE, 60)
+//                                    .option(EpollChannelOption.TCP_KEEPINTVL, 60)
+//                                    .option(EpollChannelOption.TCP_KEEPCNT, 5)
+                                    // this is good for mac os x
+                                    .option(NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPIDLE), 60)
+                                    .option(NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPINTERVAL), 60)
+                                    .option(NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPCOUNT), 5)
                                     .responseTimeout(Duration.ofMillis(esResponseTimeoutMillis));
 
                             return webClient

@@ -19,6 +19,7 @@ import reactor.core.scheduler.Schedulers;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 @Slf4j
@@ -27,6 +28,8 @@ class PersonGenerator {
     private final ObjectMapper objectMapper;
     private final ThreadLocal<Fairy> fairy;
     private final Scheduler scheduler = Schedulers.newParallel(PersonGenerator.class.getSimpleName());
+
+    AtomicLong usernameIdExt = new AtomicLong();
 
     PersonGenerator(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
@@ -63,7 +66,7 @@ class PersonGenerator {
     }
     private Doc generate() {
         Person person = fairy.get().person();
-        final String username = person.getUsername() + RandomUtils.nextInt(1_000_000, 9_000_000);
+        final String username = person.getUsername() + "_" + usernameIdExt.getAndIncrement();
         final ImmutableMap<String, Object> map = ImmutableMap.<String, Object>builder()
                 .put("address", toMap(person.getAddress()))
                 .put("firstName", person.getFirstName())

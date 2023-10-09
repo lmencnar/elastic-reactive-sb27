@@ -35,3 +35,22 @@ at reactor.core.publisher.MonoErrorSupplied.subscribe(MonoErrorSupplied.java:55)
 at reactor.core.publisher.Mono.subscribe(Mono.java:4490)
 at reactor.core.publisher.FluxOnErrorResume$ResumeSubscriber.onError(FluxOnErrorResume.java:103)
 ```
+
+Observed "tuning" effects of index settings:
+- lower number of shards - ideally 1 - improve indexing performance - too high number of shards, above physical and os capacity (like 10) significantly 
+  lower the indexing performance - like from 270 seconds total execution to 600 seconds and even leads to response timeouts
+- higher number of shards (up to a point) should improve concurrent search performance - not tested
+- high refresh interval - slightly improves indexing performance - like total execution takes 250 seconds vs 270 seconds,
+  conclusion is that increasing this time from 1 second is good but it does not make much of a difference for it to be more than 30 or 60 seconds
+
+Comments on connection timeouts and keep alive:
+- HTTP REST normally would open new connection for every request, protocol is stateless
+- the netty normally uses default connection provider with limited number of pool connections
+- as configured in this program the custom connection provider is used with 30 max connections
+- elastic own client libraries (not netty) using apache http client normally default to 30 max connections in the pool
+- When using SSL the overhead of creating a connection is significant - in the order of 10-50 milliseconds
+- the program as is does not handle SSL yet
+- When using bulk requests which take hundreds of milliseconds or several seconds the role of http connection pool is lower
+- The TCP keep alive is relevant to keep idle connections open even when not used
+- For performance overall the TCP keep alive is hardly relevant, idle connection could and should be closed
+- Attempts to keep the connections open by the client may conflict with what the server wants to achieve

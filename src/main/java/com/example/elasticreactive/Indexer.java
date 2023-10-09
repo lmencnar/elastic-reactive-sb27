@@ -65,6 +65,9 @@ public class Indexer {
     @Value("${indexer.index_replicas}")
     private Integer indexerIndexReplicas;
 
+    @Value("${indexer.index_refresh_interval}")
+    private String indexerIndexRefreshInterval;
+
     @Autowired
     private ReactiveElasticsearchClient reactiveElasticsearchClient;
 
@@ -169,11 +172,13 @@ public class Indexer {
 
             request.settings(Settings.builder()
                     .put("index.number_of_shards", indexerIndexShards)
-                    .put("index.number_of_replicas", indexerIndexReplicas).build()
+                    .put("index.number_of_replicas", indexerIndexReplicas)
+                    .put("index.refresh_interval", indexerIndexRefreshInterval).build()
             );
 
             CreateIndexResponse createIndexResponse = restHighLevelClient.indices().create(request, RequestOptions.DEFAULT);
-        } catch(IOException exc) {
+            log.info("index created {}", createIndexResponse.isAcknowledged());
+        } catch(Exception exc) {
             log.error("index create failed", exc);
         }
     }
@@ -182,7 +187,8 @@ public class Indexer {
         try {
             DeleteIndexRequest request = new DeleteIndexRequest(indexerIndexName);
             AcknowledgedResponse deleteIndexResponse = restHighLevelClient.indices().delete(request, RequestOptions.DEFAULT);
-        } catch(IOException exc) {
+            log.info("index deleted {}", deleteIndexResponse.isAcknowledged());
+        } catch(Exception exc) {
             log.error("index delete failed", exc);
         }
     }
@@ -194,11 +200,15 @@ public class Indexer {
         deleteIndex();
         createIndex();
 
+        long startTime = System.currentTimeMillis();
         Flux
                 .range(indexerMinConcurrency, indexerMaxConcurrency)
                 .concatMap(concurrency -> indexMany(indexerBatchSize, indexerBatchCount, concurrency))
                 .window(Duration.ofSeconds(1))
                 .flatMap(Flux::count)
-                .subscribe(winSize -> log.info("Got responses/sec={}", winSize));
+                .subscribe(winSize -> log.info(
+                        "Got responses/sec={} elapsed from start sec {}",
+                        winSize,
+                        (System.currentTimeMillis() - startTime)/1000.0));
     }
 }
