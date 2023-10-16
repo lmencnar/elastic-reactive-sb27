@@ -39,3 +39,7 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### certs and passwords
+*.pwd
+*.p12

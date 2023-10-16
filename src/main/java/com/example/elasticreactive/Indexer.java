@@ -1,7 +1,8 @@
 package com.example.elasticreactive;
 
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import javax.annotation.PostConstruct;
 
 import io.micrometer.core.instrument.Counter;
@@ -10,16 +11,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
-import org.elasticsearch.action.bulk.BulkRequest;
-import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.support.IndicesOptions;
-import org.elasticsearch.action.support.master.AcknowledgedResponse;
-import org.elasticsearch.client.RequestOptions;
-import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.indices.CreateIndexRequest;
-import org.elasticsearch.client.indices.CreateIndexResponse;
-
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.xcontent.XContentType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,7 +22,6 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.Semaphore;
@@ -68,17 +60,14 @@ public class Indexer {
     @Value("${indexer.index_refresh_interval}")
     private String indexerIndexRefreshInterval;
 
+    @Value("${indexer.response_warning_timeout_millis}")
+    private Integer indexerWarningTimeoutMillis;
+
     @Autowired
     private ReactiveElasticsearchClient reactiveElasticsearchClient;
 
     @Autowired
     private PersonGenerator personGenerator;
-
-    @Autowired
-    private RestHighLevelClient restHighLevelClient;
-
-    private final ObjectMapper objectMapper;
-
     SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
     private final Timer indexTimer = registry.timer("es.timer");
@@ -96,61 +85,73 @@ public class Indexer {
     // but blocking on this limit may cause timeouts so better control in the application code
     private Semaphore available;
 
-    private Flux<BulkResponse> indexMany(int batchSize, int batchCount, int concurrency) {
-        log.info("indexMany concurrency={}", concurrency);
+    private Flux<BulkResponse> indexManyGenerateBatch(int batchSize, int batchCount, int concurrency) {
+        log.info("indexManyGenerateBatch concurrency={}", concurrency);
+
         return personGenerator
-                .infinite()
-                .take(batchSize)
-                .collectList()
-                .repeat()
+                .finiteBatch(batchSize, batchCount)
                 .take(batchCount)
-                // .flatMap(docs -> indexManyDocSwallowErrors(docs), concurrency);
+                // .flatMap(docs -> indexManyDocs(docs), concurrency);
                 .flatMap(docs -> countConcurrent(measure(indexManyDocSwallowErrors(docs))), concurrency);
+    }
+
+    private Mono<BulkResponse> indexManyDocs(List<Doc> docs) {
+
+        return reactiveElasticsearchClient.bulk(createBulkRequest(docs));
+    }
+
+    private BulkRequest createBulkRequest(List<Doc> docs) {
+
+        long startTime = System.currentTimeMillis();
+
+        final BulkRequest bulkRequest = new BulkRequest();
+        docs.forEach(doc -> {
+            IndexRequest indexRequest = new IndexRequest(indexerIndexName, "person", doc.getUsername());
+            indexRequest.source(doc.getJson(), XContentType.JSON);
+            bulkRequest.add(indexRequest);
+        });
+        log.debug("bulk request created in millis {}",
+                System.currentTimeMillis() - startTime);
+        return bulkRequest;
     }
 
     private Mono<BulkResponse> indexManyDocSwallowErrors(List<Doc> docs) {
         final long startTime = System.currentTimeMillis();
         return indexManyDocs(docs)
-                .doOnSuccess(response -> {
-                    available.release();
-                    successes.increment();
-                    long duration = System.currentTimeMillis() - startTime;
-                    log.debug("success reactive bulk after {}", duration);
-                    if (duration > 1000) {
-                        log.warn("success reactive bulk after long time {}", duration);
+                .doOnSubscribe(s -> {
+                    // normally not to be used,
+                    // the concurrency  and number of available connections give enough control
+                    try {
+                        available.acquire();
+                    } catch(Exception exc) {
+                        log.error("", exc);
                     }
                 })
+                .doOnSuccess(response -> {
+                    successes.increment();
+                    if(response.getTook().duration() > indexerWarningTimeoutMillis) {
+                        log.warn("response in elastic took millis {}", response.getTook().duration());
+                    }
+                    long duration = System.currentTimeMillis() - startTime;
+                    log.debug("success reactive bulk after {}", duration);
+                })
                 .doOnError(e -> {
-                    available.release();
+                    failures.increment();
                     log.error("Unable to index after {}", System.currentTimeMillis() - startTime, e);
                 })
-                .doOnError(e -> failures.increment())
+                .doFinally( e -> {
+                    available.release();
+                })
                 .onErrorResume(e -> Mono.empty());
     }
 
-    private Mono<BulkResponse> indexManyDocs(List<Doc> docs) {
-
-        final BulkRequest bulkRequest = new BulkRequest();
-        docs.stream().forEach(doc -> {
-            IndexRequest indexRequest = new IndexRequest(indexerIndexName, "person", doc.getUsername());
-            indexRequest.source(doc.getJson(), XContentType.JSON);
-            bulkRequest.add(indexRequest);
-        });
-
-        try {
-            available.acquire();
-            log.debug("calling reactive bulk");
-            return reactiveElasticsearchClient.bulk(bulkRequest);
-        } catch (InterruptedException exc) {
-            log.error("interrupted ", exc);
-        }
-        return Mono.empty();
-    }
 
     private <T> Mono<T> countConcurrent(Mono<T> input) {
         return input
-                .doOnSubscribe(s -> concurrent.increment())
-                .doOnTerminate(concurrent::decrement);
+                .doOnSubscribe(s ->
+                        concurrent.increment())
+                .doOnTerminate(
+                        concurrent::decrement);
     }
 
     private <T> Mono<T> measure(Mono<T> input) {
@@ -159,7 +160,9 @@ public class Indexer {
                 .flatMap(time ->
                         input.doOnSuccess(x -> {
                             long duration = System.currentTimeMillis() - time;
-                            log.debug("took {}", duration);
+                            if(duration > indexerWarningTimeoutMillis) {
+                                log.warn("took long time {}", duration);
+                            }
                             indexTimer.record(duration, TimeUnit.MILLISECONDS);
                         })
                 );
@@ -176,8 +179,9 @@ public class Indexer {
                     .put("index.refresh_interval", indexerIndexRefreshInterval).build()
             );
 
-            CreateIndexResponse createIndexResponse = restHighLevelClient.indices().create(request, RequestOptions.DEFAULT);
-            log.info("index created {}", createIndexResponse.isAcknowledged());
+            boolean result = reactiveElasticsearchClient.indices().createIndex(request).block();
+
+            log.info("index created {}", result);
         } catch(Exception exc) {
             log.error("index create failed", exc);
         }
@@ -186,8 +190,10 @@ public class Indexer {
     private void deleteIndex() {
         try {
             DeleteIndexRequest request = new DeleteIndexRequest(indexerIndexName);
-            AcknowledgedResponse deleteIndexResponse = restHighLevelClient.indices().delete(request, RequestOptions.DEFAULT);
-            log.info("index deleted {}", deleteIndexResponse.isAcknowledged());
+
+            boolean result = reactiveElasticsearchClient.indices().deleteIndex(request).block();
+
+            log.info("index deleted {}", result);
         } catch(Exception exc) {
             log.error("index delete failed", exc);
         }
@@ -202,13 +208,15 @@ public class Indexer {
 
         long startTime = System.currentTimeMillis();
         Flux
-                .range(indexerMinConcurrency, indexerMaxConcurrency)
-                .concatMap(concurrency -> indexMany(indexerBatchSize, indexerBatchCount, concurrency))
+                .range(indexerMinConcurrency, 1 + indexerMaxConcurrency - indexerMinConcurrency)
+                .concatMap(concurrency -> indexManyGenerateBatch(indexerBatchSize, indexerBatchCount, concurrency))
                 .window(Duration.ofSeconds(1))
                 .flatMap(Flux::count)
                 .subscribe(winSize -> log.info(
-                        "Got responses/sec={} elapsed from start sec {}",
-                        winSize,
+                        "Got responses/sec={} concurrent={} elapsed from start sec {}",
+                        winSize, concurrent.longValue(),
                         (System.currentTimeMillis() - startTime)/1000.0));
+
+        // never reached, above waits forerver on publisher, use /_refresh to refresh index
     }
 }

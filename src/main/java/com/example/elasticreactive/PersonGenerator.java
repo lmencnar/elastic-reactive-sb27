@@ -9,9 +9,9 @@ import com.devskiller.jfairy.producer.person.Address;
 import com.devskiller.jfairy.producer.person.Person;
 import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.RandomUtils;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.IntStream;
 
 @Component
 @Slf4j
@@ -36,34 +37,37 @@ class PersonGenerator {
         fairy = ThreadLocal.withInitial(Fairy::create);
     }
 
+    /*
+    note that this generator is "slow" - it only subscribes for next item after the previous one was consumed
+     */
     Flux<Doc> infinite() {
-        return generateOne().repeat();
+        return generateMono().repeat();
     }
 
-    Flux<List<Doc>> infiniteMany() {
-        return generateMany().repeat();
+    /*
+     * This is "fast" generator, required amount of data is ready for consumption, assuming enough memory available
+     */
+    Flux<List<Doc>> finiteBatch(int batchSize, int batchCount) {
+        return Flux.create((FluxSink<List<Doc>> fluxSink) -> {
+            IntStream.range(0, batchCount).boxed().toList()
+                    .parallelStream().map(d -> generateBatch(batchSize)).forEach(fluxSink::next);
+        });
     }
 
-    private Mono<Doc> generateOne() {
+    private Mono<Doc> generateMono() {
         return Mono
                 .fromCallable(this::generate)
                 .subscribeOn(scheduler);
     }
 
-    private Mono<List<Doc>> generateMany() {
-        return Mono
-                .fromCallable(this::generateX)
-                .subscribeOn(scheduler);
+    private List<Doc> generateBatch(int batchSize) {
+        List<Doc> batchList = new ArrayList<>();
+        for(int i=0; i<batchSize; i++) {
+            batchList.add(generate());
+        }
+        return batchList;
     }
 
-    public List<Doc> generateX() {
-        List<Doc> docs = new ArrayList<>();
-        for(int i=0; i<100; i++) {
-            docs.add(generate());
-        }
-        // log.info("generatedX ");
-        return docs;
-    }
     private Doc generate() {
         Person person = fairy.get().person();
         final String username = person.getUsername() + "_" + usernameIdExt.getAndIncrement();
